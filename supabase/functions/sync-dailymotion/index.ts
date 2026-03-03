@@ -38,11 +38,15 @@ function detectSeries(title: string): { seriesName: string | null; season: numbe
 async function getDailymotionToken(): Promise<string> {
   const key = Deno.env.get('DAILYMOTION_KEY')!;
   const secret = Deno.env.get('DAILYMOTION_SECRET')!;
+  const username = Deno.env.get('DAILYMOTION_USERNAME')!;
+  const password = Deno.env.get('DAILYMOTION_PASSWORD')!;
 
   const params = new URLSearchParams({
-    grant_type: 'client_credentials',
+    grant_type: 'password',
     client_id: key,
     client_secret: secret,
+    username,
+    password,
     scope: 'read',
   });
 
@@ -58,6 +62,10 @@ async function getDailymotionToken(): Promise<string> {
   }
 
   const data = await res.json();
+  console.log('Token response keys:', Object.keys(data));
+  if (!data.access_token) {
+    throw new Error(`No access_token in response: ${JSON.stringify(data)}`);
+  }
   return data.access_token;
 }
 
@@ -80,8 +88,10 @@ Deno.serve(async (req) => {
     let hasMore = true;
 
     while (hasMore) {
-      const apiUrl = `https://api.dailymotion.com/me/videos?fields=id,title,thumbnail_url,duration,created_time,description&limit=100&page=${page}&access_token=${token}`;
-      const res = await fetch(apiUrl);
+      const apiUrl = `https://api.dailymotion.com/me/videos?fields=id,title,thumbnail_url,duration,created_time,description&limit=100&page=${page}`;
+      const res = await fetch(apiUrl, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
 
       if (!res.ok) {
         const err = await res.text();
