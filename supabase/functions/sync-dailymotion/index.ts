@@ -62,9 +62,8 @@ async function getDailymotionToken(): Promise<string> {
   }
 
   const data = await res.json();
-  console.log('Token response keys:', Object.keys(data));
   if (!data.access_token) {
-    throw new Error(`No access_token in response: ${JSON.stringify(data)}`);
+    throw new Error(`Dailymotion auth failed: ${JSON.stringify(data)}`);
   }
   return data.access_token;
 }
