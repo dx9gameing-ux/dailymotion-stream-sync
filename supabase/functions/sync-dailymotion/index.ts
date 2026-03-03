@@ -15,31 +15,48 @@ function generateSlug(title: string, videoId: string): string {
 }
 
 function detectSeries(title: string): { seriesName: string | null; season: number | null; episode: number | null } {
-  // Match patterns like S01E01, S1E1, Season 1 Episode 1
   const patterns = [
     /^(.+?)\s+[Ss](\d+)[Ee](\d+)/,
     /^(.+?)\s+Season\s+(\d+)\s+Episode\s+(\d+)/i,
     /^(.+?)\s+(\d+)x(\d+)/,
   ];
-
   for (const pattern of patterns) {
     const match = title.match(pattern);
     if (match) {
-      return {
-        seriesName: match[1].trim(),
-        season: parseInt(match[2]),
-        episode: parseInt(match[3]),
-      };
+      return { seriesName: match[1].trim(), season: parseInt(match[2]), episode: parseInt(match[3]) };
     }
   }
   return { seriesName: null, season: null, episode: null };
 }
 
-async function getDailymotionToken(): Promise<string> {
+async function getClientToken(): Promise<string | null> {
   const key = Deno.env.get('DAILYMOTION_KEY')!;
   const secret = Deno.env.get('DAILYMOTION_SECRET')!;
-  const username = Deno.env.get('DAILYMOTION_USERNAME')!;
-  const password = Deno.env.get('DAILYMOTION_PASSWORD')!;
+
+  const params = new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: key,
+    client_secret: secret,
+  });
+
+  const res = await fetch('https://api.dailymotion.com/oauth/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString(),
+  });
+
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data.access_token || null;
+}
+
+async function getUserToken(): Promise<string | null> {
+  const key = Deno.env.get('DAILYMOTION_KEY')!;
+  const secret = Deno.env.get('DAILYMOTION_SECRET')!;
+  const username = Deno.env.get('DAILYMOTION_USERNAME') || '';
+  const password = Deno.env.get('DAILYMOTION_PASSWORD') || '';
+
+  if (!username || !password) return null;
 
   const params = new URLSearchParams({
     grant_type: 'password',
@@ -56,16 +73,9 @@ async function getDailymotionToken(): Promise<string> {
     body: params.toString(),
   });
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Dailymotion auth failed: ${err}`);
-  }
-
+  if (!res.ok) return null;
   const data = await res.json();
-  if (!data.access_token) {
-    throw new Error(`Dailymotion auth failed: ${JSON.stringify(data)}`);
-  }
-  return data.access_token;
+  return data.access_token || null;
 }
 
 Deno.serve(async (req) => {
@@ -79,18 +89,34 @@ Deno.serve(async (req) => {
   );
 
   try {
-    const token = await getDailymotionToken();
+    const channel = Deno.env.get('DAILYMOTION_CHANNEL') || '';
 
-    // Fetch all videos from the authenticated user's account
+    // Try user token first, then client credentials
+    const userToken = await getUserToken();
+    const clientToken = await getClientToken();
+    const token = userToken || clientToken;
+
     let page = 1;
     let allVideos: any[] = [];
     let hasMore = true;
 
     while (hasMore) {
-      const apiUrl = `https://api.dailymotion.com/me/videos?fields=id,title,thumbnail_url,duration,created_time,description&limit=100&page=${page}`;
-      const res = await fetch(apiUrl, {
-        headers: { 'Authorization': `Bearer ${token}` },
-      });
+      let apiUrl: string;
+
+      if (userToken) {
+        // Authenticated: fetch own videos
+        apiUrl = `https://api.dailymotion.com/me/videos?fields=id,title,thumbnail_url,duration,created_time,description&limit=100&page=${page}`;
+      } else if (channel) {
+        // Public channel endpoint: no auth needed
+        apiUrl = `https://api.dailymotion.com/user/${channel}/videos?fields=id,title,thumbnail_url,duration,created_time,description&limit=100&page=${page}&private=0`;
+      } else {
+        throw new Error('No authentication or channel configured. Please set DAILYMOTION_USERNAME+PASSWORD or DAILYMOTION_CHANNEL.');
+      }
+
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch(apiUrl, { headers });
 
       if (!res.ok) {
         const err = await res.text();
@@ -101,18 +127,13 @@ Deno.serve(async (req) => {
       allVideos = allVideos.concat(data.list || []);
       hasMore = data.has_more || false;
       page++;
-
-      if (page > 10) break; // Safety limit
+      if (page > 10) break;
     }
 
     // Get existing video IDs from DB
-    const { data: existing } = await supabase
-      .from('videos')
-      .select('video_id');
-
+    const { data: existing } = await supabase.from('videos').select('video_id');
     const existingIds = new Set((existing || []).map((v: any) => v.video_id));
 
-    // Filter new videos
     const newVideos = allVideos.filter((v: any) => !existingIds.has(v.id));
 
     if (newVideos.length > 0) {
@@ -132,14 +153,10 @@ Deno.serve(async (req) => {
         };
       });
 
-      const { error: insertError } = await supabase
-        .from('videos')
-        .insert(toInsert);
-
+      const { error: insertError } = await supabase.from('videos').insert(toInsert);
       if (insertError) throw insertError;
     }
 
-    // Log the sync
     await supabase.from('sync_logs').insert({
       videos_added: newVideos.length,
       status: 'success',
